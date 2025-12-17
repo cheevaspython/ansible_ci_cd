@@ -1,0 +1,314 @@
+version: "3.9"
+
+# ============================================================================
+# COMMON CONFIGURATION
+# ============================================================================
+
+x-fastapi-common: &fastapi-common
+  image: {{ registry_image }}:{{ image_tag }}
+  env_file: .env
+  depends_on:
+    - redis{{ service_suffix }}
+    - db_postgres{{ service_suffix }}
+  user: docker-admin
+  secrets:
+    - {{ postgres_user_secret }}
+    - {{ postgres_password_secret }}
+    - {{ redis_password_secret }}
+    - s3_access_key
+    - s3_secret_key
+  networks:
+    - {{ internal_network }}
+    - {{ public_network }}
+  labels:
+    - "com.docker.stack.image.pull_policy=always"
+  logging:
+    driver: {{ log_driver }}
+    options:
+      max-size: "{{ log_max_size }}"
+      max-file: "{{ log_max_file }}"
+
+# ============================================================================
+# SERVICES
+# ============================================================================
+
+services:
+  backend{{ service_suffix }}:
+    <<: *fastapi-common
+    command: >
+      sh -c "uvicorn source.main:create_app --host 0.0.0.0 --port 8088"
+    healthcheck:
+      test: curl -f http://localhost:8088/api/v1/healthcheck/ || exit 1
+      interval: {{ backend_healthcheck_interval }}
+      timeout: {{ backend_healthcheck_timeout }}
+      retries: {{ backend_healthcheck_retries }}
+      start_period: {{ backend_healthcheck_start_period }}
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.docker.network={{ traefik_network }}"
+        # Swagger Router без JWT
+        - "traefik.http.routers.backend{{ service_suffix }}_swagger.rule=PathPrefix(`/{{ service_name }}/docs`) || PathPrefix(`/{{ service_name }}/openapi.json`) || PathPrefix(`/{{ service_name }}/redoc`)"
+        - "traefik.http.routers.backend{{ service_suffix }}_swagger.entrypoints=web"
+        - "traefik.http.routers.backend{{ service_suffix }}_swagger.priority=1001"
+        - "traefik.http.routers.backend{{ service_suffix }}_swagger.middlewares=secure-headers@file"
+        - "traefik.http.routers.backend{{ service_suffix }}_swagger.service=backend{{ service_suffix }}"
+        # Основной защищённый Router
+        - "traefik.http.routers.backend{{ service_suffix }}.rule=PathPrefix(`/{{ service_name }}`)"
+        - "traefik.http.routers.backend{{ service_suffix }}.entrypoints=web"
+        - "traefik.http.routers.backend{{ service_suffix }}.priority=1000"
+        - "traefik.http.routers.backend{{ service_suffix }}.middlewares=jwt-auth@file,secure-headers@file"
+        - "traefik.http.services.backend{{ service_suffix }}.loadbalancer.server.port=8088"
+        # Healthcheck для Traefik
+        - "traefik.http.services.backend{{ service_suffix }}.loadbalancer.healthcheck.path=/api/v1/healthcheck/"
+        - "traefik.http.services.backend{{ service_suffix }}.loadbalancer.healthcheck.interval=10s"
+        - "traefik.http.services.backend{{ service_suffix }}.loadbalancer.healthcheck.timeout=3s"
+      endpoint_mode: dnsrr
+      replicas: {{ backend_replicas }}
+      restart_policy:
+        condition: any
+      placement:
+        constraints:
+{% if environment_name == 'production' %}
+          - "{{ backend_placement_constraint }}"
+{% else %}
+          - "{{ placement_constraint }}"
+{% endif %}
+      update_config:
+        failure_action: {{ update_failure_action }}
+        order: {{ update_order }}
+        monitor: {{ update_monitor }}
+        parallelism: {{ update_parallelism }}
+        delay: {{ update_delay }}
+      resources:
+        limits:
+          cpus: "{{ backend_cpu_limit }}"
+          memory: {{ backend_memory_limit }}
+
+  taskiq_worker{{ service_suffix }}:
+    <<: *fastapi-common
+    command: >
+      sh -c "taskiq worker --ack-type when_received source.config.taskiq:create_taskiq_app source.tasks"
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep taskiq | grep -v grep || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: {{ worker_replicas }}
+      restart_policy:
+        condition: any
+      placement:
+        constraints:
+{% if environment_name == 'production' %}
+          - "{{ worker_placement_constraint }}"
+{% else %}
+          - "{{ placement_constraint }}"
+{% endif %}
+      update_config:
+        failure_action: {{ update_failure_action }}
+        order: {{ update_order }}
+        monitor: {{ update_monitor }}
+        parallelism: {{ update_parallelism }}
+        delay: {{ update_delay }}
+      resources:
+        limits:
+          cpus: "{{ worker_cpu_limit }}"
+          memory: {{ worker_memory_limit }}
+
+  kafka_faststream{{ service_suffix }}:
+    <<: *fastapi-common
+    command: >
+      sh -c "faststream run source.config.kafka:app"
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'source.config.kafka' || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: {{ kafka_replicas }}
+      restart_policy:
+        condition: any
+      placement:
+        constraints:
+{% if environment_name == 'production' %}
+          - "{{ worker_placement_constraint }}"
+{% else %}
+          - "{{ placement_constraint }}"
+{% endif %}
+      update_config:
+        failure_action: {{ update_failure_action }}
+        order: {{ update_order }}
+        monitor: {{ update_monitor }}
+        parallelism: {{ update_parallelism }}
+        delay: {{ update_delay }}
+      resources:
+        limits:
+          cpus: "{{ kafka_cpu_limit }}"
+          memory: {{ kafka_memory_limit }}
+        reservations:
+          cpus: "{{ kafka_cpu_reservation }}"
+          memory: {{ kafka_memory_reservation }}
+
+  taskiq_scheduler{{ service_suffix }}:
+    <<: *fastapi-common
+    command: >
+      sh -c "taskiq scheduler source.config.taskiq:create_taskiq_scheduler source.tasks"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+      placement:
+        constraints:
+{% if environment_name == 'production' %}
+          - "{{ worker_placement_constraint }}"
+{% else %}
+          - "{{ placement_constraint }}"
+{% endif %}
+      update_config:
+        failure_action: {{ update_failure_action }}
+        order: {{ update_order }}
+        monitor: {{ update_monitor }}
+        parallelism: {{ update_parallelism }}
+        delay: {{ update_delay }}
+
+  migration{{ service_suffix }}:
+    <<: *fastapi-common
+    command: ["alembic", "upgrade", "head"]
+    deploy:
+      replicas: 0
+      restart_policy:
+        condition: none
+      placement:
+        constraints:
+{% if environment_name == 'production' %}
+          - "{{ worker_placement_constraint }}"
+{% else %}
+          - "node.labels.TAG == worker"
+{% endif %}
+
+  db_postgres{{ service_suffix }}:
+    image: postgres:16.2-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER_FILE: /run/secrets/{{ postgres_user_secret }}
+      POSTGRES_PASSWORD_FILE: /run/secrets/{{ postgres_password_secret }}
+    secrets:
+      - {{ postgres_user_secret }}
+      - {{ postgres_password_secret }}
+    networks:
+      - {{ internal_network }}
+    volumes:
+      - psql{{ service_suffix }}:/var/lib/postgresql/data/
+    deploy:
+      endpoint_mode: dnsrr
+      placement:
+        constraints:
+{% if environment_name == 'production' %}
+          - "{{ db_placement_constraint }}"
+{% else %}
+          - "{{ placement_constraint }}"
+{% endif %}
+      restart_policy:
+        condition: on-failure
+        delay: 25s
+        max_attempts: 5
+      resources:
+        limits:
+          cpus: "{{ postgres_cpu_limit }}"
+          memory: {{ postgres_memory_limit }}
+    configs:
+      - source: postgres_healthcheck{{ service_suffix }}
+        target: /usr/local/bin/healthcheck.sh
+        mode: 0555
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis{{ service_suffix }}:
+    image: redis:7.0.5-alpine
+    hostname: redis{{ service_suffix }}
+    command: >
+      sh -c "exec redis-server --requirepass \"$$(
+        cat /run/secrets/{{ redis_password_secret }}
+      )\""
+    secrets:
+      - {{ redis_password_secret }}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    configs:
+      - source: redis_healthcheck{{ service_suffix }}
+        target: /usr/local/bin/healthcheck.sh
+        mode: 0555
+    networks:
+      - {{ internal_network }}
+    deploy:
+      endpoint_mode: dnsrr
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 8s
+      resources:
+        limits:
+          cpus: "{{ redis_cpu_limit }}"
+          memory: {{ redis_memory_limit }}
+    logging:
+      driver: {{ log_driver }}
+      options:
+        max-size: "{{ log_max_size }}"
+        max-file: "{{ log_max_file }}"
+
+# ============================================================================
+# SECRETS
+# ============================================================================
+
+secrets:
+  {{ postgres_user_secret }}:
+    external: true
+  {{ postgres_password_secret }}:
+    external: true
+  {{ redis_password_secret }}:
+    external: true
+  s3_access_key:
+    external: true
+  s3_secret_key:
+    external: true
+
+# ============================================================================
+# NETWORKS
+# ============================================================================
+
+networks:
+  {{ internal_network }}:
+    driver: overlay
+    internal: true
+  {{ public_network }}:
+    driver: overlay
+
+# ============================================================================
+# CONFIGS
+# ============================================================================
+
+configs:
+  postgres_healthcheck{{ service_suffix }}:
+    file: ./scripts/db_healthcheck.sh
+  redis_healthcheck{{ service_suffix }}:
+    file: ./scripts/redis_healthcheck.sh
+
+# ============================================================================
+# VOLUMES
+# ============================================================================
+
+volumes:
+  psql{{ service_suffix }}:

@@ -1,0 +1,220 @@
+---
+# ============================================================================
+# ROLLBACK PLAYBOOK
+# ============================================================================
+
+- name: Rollback deployment
+  hosts: swarm_managers[0]
+  gather_facts: yes
+  vars_prompt:
+    - name: confirm_rollback
+      prompt: "Are you sure you want to rollback? Type 'yes' to confirm"
+      private: no
+
+  vars:
+    registry_password_required: yes
+
+  pre_tasks:
+    - name: Verify rollback confirmation
+      fail:
+        msg: "Rollback cancelled by user"
+      when: confirm_rollback != 'yes'
+      tags: [rollback, confirm]
+
+    - name: Check if rollback info exists
+      stat:
+        path: "{{ rollback_info_path }}"
+      register: rollback_info_file
+      tags: [rollback, check]
+
+    - name: Fail if no rollback info available
+      fail:
+        msg: |
+          No rollback information found at {{ rollback_info_path }}
+          This might be the first deployment or rollback info was not saved.
+      when: not rollback_info_file.stat.exists
+      tags: [rollback, check]
+
+    - name: Load rollback information
+      include_vars:
+        file: "{{ rollback_info_path }}"
+        name: rollback_info
+      tags: [rollback, check]
+
+    - name: Display rollback information
+      debug:
+        msg: |
+          ================================================
+          ROLLBACK INFORMATION
+          ================================================
+          Current Image: {{ rollback_info.current_image }}
+          Target Image: {{ rollback_info.previous_image }}
+          Previous Deploy: {{ rollback_info.deployed_at }}
+          Previous Deploy By: {{ rollback_info.deployed_by }}
+          Environment: {{ rollback_info.environment }}
+          ================================================
+      tags: [rollback, info]
+
+  tasks:
+    # ========================================================================
+    # VERIFY CURRENT STATE
+    # ========================================================================
+
+    - name: Get current service image
+      shell: |
+        docker service inspect {{ stack_name }}_backend{{ service_suffix }} \
+          --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null || echo "none"
+      register: current_deployed_image
+      changed_when: false
+      failed_when: current_deployed_image.stdout == "none"
+      tags: [rollback, verify]
+
+    - name: Check if already rolled back
+      fail:
+        msg: |
+          Cannot rollback - current and target versions are the same!
+          Current: {{ current_deployed_image.stdout }}
+          Target: {{ rollback_info.previous_image }}
+      when: current_deployed_image.stdout == rollback_info.previous_image
+      tags: [rollback, verify]
+
+    # ========================================================================
+    # DOCKER REGISTRY AUTHENTICATION
+    # ========================================================================
+
+    - name: Prompt for registry password
+      pause:
+        prompt: "Enter GitLab Registry Password (Deploy Token)"
+        echo: no
+      register: registry_password_input
+      when: registry_password_required | bool
+      tags: [rollback, login]
+
+    - name: Login to GitLab Container Registry
+      community.docker.docker_login:
+        registry_url: "{{ registry_url }}"
+        username: "{{ lookup('env', 'CI_REGISTRY_USER') | default('deploy-token', true) }}"
+        password: "{{ registry_password_input.user_input | default(lookup('env', 'REGISTRY_PASSWORD'), true) }}"
+        reauthorize: yes
+      no_log: true
+      tags: [rollback, login]
+
+    # ========================================================================
+    # EXTRACT TARGET IMAGE DETAILS
+    # ========================================================================
+
+    - name: Parse target image
+      set_fact:
+        target_image: "{{ rollback_info.previous_image.split(':')[0] }}"
+        target_tag: "{{ rollback_info.previous_image.split(':')[1] }}"
+      tags: [rollback, prepare]
+
+    # ========================================================================
+    # PULL TARGET IMAGE
+    # ========================================================================
+
+    - name: Pull rollback target image
+      community.docker.docker_image:
+        name: "{{ target_image }}"
+        tag: "{{ target_tag }}"
+        source: pull
+        force_source: yes
+      tags: [rollback, pull]
+
+    # ========================================================================
+    # SAVE CURRENT STATE FOR POTENTIAL FUTURE ROLLBACK
+    # ========================================================================
+
+    - name: Backup current deployment info
+      copy:
+        src: "{{ rollback_info_path }}"
+        dest: "{{ rollback_info_path }}.backup"
+        remote_src: yes
+      tags: [rollback, backup]
+
+    - name: Update rollback info with current state
+      copy:
+        content: |
+          ---
+          previous_image: {{ current_deployed_image.stdout }}
+          current_image: {{ rollback_info.previous_image }}
+          deployed_at: {{ ansible_date_time.iso8601 }}
+          deployed_by: {{ ansible_user }}
+          environment: {{ environment_name }}
+          rollback_from: {{ rollback_info.current_image }}
+        dest: "{{ rollback_info_path }}"
+        mode: "0644"
+      tags: [rollback, backup]
+
+    # ========================================================================
+    # UPDATE SERVICES
+    # ========================================================================
+
+    - name: Get list of services to rollback
+      shell: |
+        docker service ls --filter 'name={{ stack_name }}_' --format '{{.Name}}' | \
+        grep '{{ service_suffix }}$' | \
+        grep -v 'migration\|db_postgres\|redis'
+      register: services_to_rollback
+      changed_when: false
+      failed_when: services_to_rollback.stdout == ""
+      tags: [rollback, update]
+
+    - name: Display services to rollback
+      debug:
+        msg: "Services to rollback: {{ services_to_rollback.stdout_lines }}"
+      tags: [rollback, update]
+
+    - name: Rollback services to previous image
+      shell: |
+        docker service update \
+          --detach=false \
+          --with-registry-auth \
+          --image {{ rollback_info.previous_image }} \
+          {{ item }}
+      loop: "{{ services_to_rollback.stdout_lines }}"
+      register: service_updates
+      tags: [rollback, update]
+
+    - name: Wait for rollback to stabilize
+      pause:
+        seconds: 30
+      tags: [rollback, update]
+
+    # ========================================================================
+    # VERIFY ROLLBACK
+    # ========================================================================
+
+    - name: Verify rollback
+      shell: |
+        docker service inspect {{ stack_name }}_backend{{ service_suffix }} \
+          --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'
+      register: verify_image
+      changed_when: false
+      tags: [rollback, verify]
+
+    - name: Check rollback success
+      assert:
+        that:
+          - verify_image.stdout == rollback_info.previous_image
+        fail_msg: |
+          Rollback verification failed!
+          Expected: {{ rollback_info.previous_image }}
+          Actual: {{ verify_image.stdout }}
+        success_msg: "Rollback verified successfully"
+      tags: [rollback, verify]
+
+  post_tasks:
+    - name: Rollback summary
+      debug:
+        msg: |
+          ================================================
+          ROLLBACK COMPLETED SUCCESSFULLY
+          ================================================
+          Rolled back FROM: {{ rollback_info.current_image }}
+          Rolled back TO:   {{ rollback_info.previous_image }}
+          ================================================
+
+          IMPORTANT: Database migrations were NOT rolled back!
+          ================================================
+      tags: [rollback, summary]

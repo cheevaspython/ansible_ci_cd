@@ -1,0 +1,119 @@
+---
+# ============================================================================
+# ENVIRONMENT CONFIGURATION - PRODUCTION
+# ============================================================================
+
+environment_name: "production"
+stack_name: "main"
+
+# ============================================================================
+# SERVICE CONFIGURATION
+# ============================================================================
+
+# Название микросервиса - ИЗМЕНЯЕТСЯ ДЛЯ КАЖДОГО СЕРВИСА
+service_name: "product"
+service_suffix: "_product"
+
+# GitLab Registry
+registry_url: "registry.gitlab.com"
+registry_image: "registry.gitlab.com/cheepython/calorie_product"
+image_tag: "pr" # production tag
+
+# ============================================================================
+# DEPLOYMENT SETTINGS
+# ============================================================================
+
+# Paths
+deploy_base_path: "/home/admin_remote/swarm"
+deploy_path: "{{ deploy_base_path }}/calorie_{{ service_name }}"
+stack_file_path: "{{ deploy_path }}/docker-stack.yml"
+rollback_info_path: "{{ deploy_path }}/.deploy_info.yml"
+
+# Deployment strategy
+update_parallelism: 1
+update_delay: "10s"
+update_order: "start-first"
+update_failure_action: "rollback"
+update_monitor: "30s"
+
+# Replicas - PRODUCTION HAS MORE
+backend_replicas: 2
+worker_replicas: 1
+kafka_replicas: 1
+
+# Node placement - DIFFERENT LABELS FOR PRODUCTION
+backend_placement_constraint: "node.labels.TAG == back_sel"
+worker_placement_constraint: "node.labels.TAG == back_sel"
+db_placement_constraint: "node.labels.TAG == db_sel"
+
+# ============================================================================
+# HEALTH CHECKS
+# ============================================================================
+
+backend_healthcheck_interval: "20s"
+backend_healthcheck_timeout: "5s"
+backend_healthcheck_retries: 3
+backend_healthcheck_start_period: "30s"
+
+# ============================================================================
+# DOCKER SECRETS
+# ============================================================================
+
+# Secrets names (external Docker secrets)
+postgres_user_secret: "postgres_user"
+postgres_password_secret: "postgres_password_{{ service_suffix }}"
+redis_password_secret: "redis{{ service_suffix }}_password"
+s3_access_key_secret: "s3_access_key"
+s3_secret_key_secret: "s3_secret_key"
+
+# ============================================================================
+# DATABASE CONFIGURATION
+# ============================================================================
+
+postgres_db: "postgres"
+postgres_host: "db_postgres{{ service_suffix }}"
+postgres_port: "5432"
+
+# ============================================================================
+# REDIS CONFIGURATION
+# ============================================================================
+
+redis_host: "redis{{ service_suffix }}"
+redis_port: "6379"
+
+# ============================================================================
+# NETWORK CONFIGURATION
+# ============================================================================
+
+internal_network: "internal_network"
+public_network: "public_network"
+traefik_network: "main_internal_network"
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+log_driver: "json-file"
+log_max_size: "10m"
+log_max_file: "3"
+
+# ============================================================================
+# RESOURCE LIMITS
+# ============================================================================
+
+backend_cpu_limit: "1.0"
+backend_memory_limit: "1G"
+
+worker_cpu_limit: "0.5"
+worker_memory_limit: "512M"
+
+kafka_cpu_limit: "0.5"
+kafka_memory_limit: "512M"
+kafka_cpu_reservation: "0.25"
+kafka_memory_reservation: "256M"
+
+postgres_cpu_limit: "1.0"
+postgres_memory_limit: "1G"
+
+redis_cpu_limit: "0.25"
+redis_memory_limit: "256M"

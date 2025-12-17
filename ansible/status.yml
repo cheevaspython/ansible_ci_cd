@@ -1,0 +1,66 @@
+---
+# ============================================================================
+# STATUS CHECK PLAYBOOK
+# ============================================================================
+
+- name: Check deployment status
+  hosts: swarm_managers[0]
+  gather_facts: yes
+
+  tasks:
+    - name: Get Docker Swarm info
+      shell: docker info --format '{{.Swarm.NodeID}}'
+      register: swarm_info
+      changed_when: false
+
+    - name: Check Swarm manager status
+      shell: docker node ls --format 'table {{.Hostname}}\t{{.Status}}\t{{.Availability}}\t{{.ManagerStatus}}'
+      register: swarm_nodes
+      changed_when: false
+
+    - name: Display Swarm nodes
+      debug:
+        msg: "{{ swarm_nodes.stdout_lines }}"
+
+    - name: Check if stack exists
+      shell: docker stack ls --format '{{.Name}}' | grep -q "^{{ stack_name }}$"
+      register: stack_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Get stack services
+      shell: |
+        docker service ls --filter name={{ stack_name }}_ \
+          --format 'table {{.Name}}\t{{.Mode}}\t{{.Replicas}}\t{{.Image}}'
+      register: stack_services
+      when: stack_exists.rc == 0
+      changed_when: false
+
+    - name: Display stack services
+      debug:
+        msg: "{{ stack_services.stdout_lines }}"
+      when: stack_exists.rc == 0
+
+    - name: Check deployment info
+      stat:
+        path: "{{ rollback_info_path }}"
+      register: deploy_info_file
+
+    - name: Load deployment info
+      include_vars:
+        file: "{{ rollback_info_path }}"
+        name: deploy_info
+      when: deploy_info_file.stat.exists
+
+    - name: Display deployment info
+      debug:
+        msg: |
+          ================================================
+          CURRENT DEPLOYMENT
+          ================================================
+          Current Image: {{ deploy_info.current_image }}
+          Previous Image: {{ deploy_info.previous_image }}
+          Deployed At: {{ deploy_info.deployed_at }}
+          Deployed By: {{ deploy_info.deployed_by }}
+          ================================================
+      when: deploy_info_file.stat.exists

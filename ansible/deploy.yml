@@ -1,0 +1,262 @@
+---
+# ============================================================================
+# DEPLOY PLAYBOOK FOR DOCKER SWARM
+# ============================================================================
+
+- name: Deploy application to Docker Swarm
+  hosts: swarm_managers[0]
+  gather_facts: yes
+  vars_prompt:
+    - name: registry_password
+      prompt: "Enter GitLab Registry Password (Deploy Token)"
+      private: yes
+
+  vars:
+    deploy_timestamp: "{{ ansible_date_time.iso8601 }}"
+
+  pre_tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - registry_url is defined
+          - registry_image is defined
+          - image_tag is defined
+          - stack_name is defined
+          - service_name is defined
+        fail_msg: "Required variables are not defined"
+        success_msg: "All required variables are present"
+
+    - name: Display deployment information
+      debug:
+        msg: |
+          ================================================
+          DEPLOYMENT INFORMATION
+          ================================================
+          Environment: {{ environment_name }}
+          Stack: {{ stack_name }}
+          Service: {{ service_name }}
+          Image: {{ registry_image }}:{{ image_tag }}
+          Deploy Path: {{ deploy_path }}
+          Timestamp: {{ deploy_timestamp }}
+          ================================================
+
+  tasks:
+    # ========================================================================
+    # DOCKER REGISTRY AUTHENTICATION
+    # ========================================================================
+
+    - name: Login to GitLab Container Registry
+      community.docker.docker_login:
+        registry_url: "{{ registry_url }}"
+        username: "{{ lookup('env', 'CI_REGISTRY_USER') | default('deploy-token', true) }}"
+        password: "{{ registry_password }}"
+        reauthorize: yes
+      no_log: true
+      tags: [deploy, login]
+
+    # ========================================================================
+    # DEPLOYMENT DIRECTORY SETUP
+    # ========================================================================
+
+    - name: Ensure deployment directory exists
+      file:
+        path: "{{ deploy_path }}"
+        state: directory
+        mode: "0755"
+      tags: [deploy, setup]
+
+    - name: Ensure scripts directory exists
+      file:
+        path: "{{ deploy_path }}/scripts"
+        state: directory
+        mode: "0755"
+      tags: [deploy, setup]
+
+    # ========================================================================
+    # HEALTHCHECK SCRIPTS
+    # ========================================================================
+
+    - name: Copy PostgreSQL healthcheck script
+      copy:
+        content: |
+          #!/bin/sh
+          set -e
+
+          if [ -f /run/secrets/{{ postgres_user_secret }} ]; then
+            export PGUSER=$(cat /run/secrets/{{ postgres_user_secret }})
+          else
+            export PGUSER=postgres
+          fi
+
+          if [ -f /run/secrets/{{ postgres_password_secret }} ]; then
+            export PGPASSWORD=$(cat /run/secrets/{{ postgres_password_secret }})
+          fi
+
+          pg_isready -h localhost -p 5432 -U "$PGUSER"
+        dest: "{{ deploy_path }}/scripts/db_healthcheck.sh"
+        mode: "0755"
+      tags: [deploy, setup]
+
+    - name: Copy Redis healthcheck script
+      copy:
+        content: |
+          #!/bin/sh
+          set -e
+
+          if [ -f /run/secrets/{{ redis_password_secret }} ]; then
+            REDIS_PASSWORD=$(cat /run/secrets/{{ redis_password_secret }})
+            redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG
+          else
+            redis-cli ping | grep -q PONG
+          fi
+        dest: "{{ deploy_path }}/scripts/redis_healthcheck.sh"
+        mode: "0755"
+      tags: [deploy, setup]
+
+    # ========================================================================
+    # ENVIRONMENT FILE
+    # ========================================================================
+
+    - name: Create .env file
+      copy:
+        content: |
+          POSTGRES_DB={{ postgres_db }}
+          POSTGRES_HOST={{ postgres_host }}
+          POSTGRES_PORT={{ postgres_port }}
+          REDIS_HOST={{ redis_host }}
+          REDIS_PORT={{ redis_port }}
+          PSQL_USER_SECRET_NAME={{ postgres_user_secret }}
+          PSQL_PASSWORD_SECRET_NAME={{ postgres_password_secret }}
+          REDIS_PASSWORD={{ redis_password_secret }}
+        dest: "{{ deploy_path }}/.env"
+        mode: "0600"
+      tags: [deploy, config]
+
+    # ========================================================================
+    # GENERATE STACK FILE FROM TEMPLATE
+    # ========================================================================
+
+    - name: Generate docker-stack.yml from template
+      template:
+        src: templates/docker-stack.yml.j2
+        dest: "{{ stack_file_path }}"
+        mode: "0644"
+      register: stack_file
+      tags: [deploy, config]
+
+    - name: Display stack file changes
+      debug:
+        msg: "Stack file {{ 'changed' if stack_file.changed else 'unchanged' }}"
+      tags: [deploy, config]
+
+    # ========================================================================
+    # SAVE CURRENT DEPLOYMENT INFO FOR ROLLBACK
+    # ========================================================================
+
+    - name: Get current service image (for rollback)
+      shell: |
+        docker service inspect {{ stack_name }}_backend{{ service_suffix }} \
+          --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null || echo "none"
+      register: current_image
+      changed_when: false
+      failed_when: false
+      tags: [deploy, rollback-prep]
+
+    - name: Save deployment info for rollback
+      copy:
+        content: |
+          ---
+          previous_image: {{ current_image.stdout }}
+          current_image: {{ registry_image }}:{{ image_tag }}
+          deployed_at: {{ deploy_timestamp }}
+          deployed_by: {{ ansible_user }}
+          environment: {{ environment_name }}
+        dest: "{{ rollback_info_path }}"
+        mode: "0644"
+      when: current_image.stdout != "none"
+      tags: [deploy, rollback-prep]
+
+    # ========================================================================
+    # PULL FRESH IMAGE
+    # ========================================================================
+
+    - name: Pull fresh image from registry
+      community.docker.docker_image:
+        name: "{{ registry_image }}"
+        tag: "{{ image_tag }}"
+        source: pull
+        force_source: yes
+      tags: [deploy, pull]
+
+    # ========================================================================
+    # DEPLOY STACK
+    # ========================================================================
+
+    - name: Deploy stack to Docker Swarm
+      community.docker.docker_stack:
+        state: present
+        name: "{{ stack_name }}"
+        prune: yes
+        with_registry_auth: yes
+        compose:
+          - "{{ stack_file_path }}"
+      register: stack_deploy
+      tags: [deploy, stack]
+
+    - name: Wait for stack deployment to stabilize
+      pause:
+        seconds: 15
+      when: stack_deploy.changed
+      tags: [deploy, stack]
+
+    # ========================================================================
+    # VERIFY DEPLOYMENT
+    # ========================================================================
+
+    - name: Check service status
+      shell: |
+        docker service ls --filter name={{ stack_name }}_ --format 'table {{.Name}}\t{{.Replicas}}\t{{.Image}}'
+      register: service_status
+      changed_when: false
+      tags: [deploy, verify]
+
+    - name: Display service status
+      debug:
+        msg: "{{ service_status.stdout_lines }}"
+      tags: [deploy, verify]
+
+    - name: Verify services are running
+      shell: |
+        docker service ps {{ stack_name }}_backend{{ service_suffix }} \
+          --filter desired-state=running \
+          --format '{{.CurrentState}}' | head -n1
+      register: backend_status
+      changed_when: false
+      failed_when: "'hour' in backend_status.stdout or 'day' in backend_status.stdout"
+      tags: [deploy, verify]
+
+    - name: Display backend status
+      debug:
+        msg: "Backend service: {{ backend_status.stdout }}"
+      tags: [deploy, verify]
+
+  post_tasks:
+    - name: Deployment summary
+      debug:
+        msg: |
+          ================================================
+          DEPLOYMENT COMPLETED SUCCESSFULLY
+          ================================================
+          Stack: {{ stack_name }}
+          Service: {{ service_name }}
+          Image: {{ registry_image }}:{{ image_tag }}
+          Environment: {{ environment_name }}
+          Timestamp: {{ deploy_timestamp }}
+          ================================================
+
+          Next steps:
+          1. Run migrations: ansible-playbook migrate.yml -i inventories/{{ environment_name }}
+          2. Monitor services: docker service ls
+          3. Check logs: docker service logs {{ stack_name }}_backend{{ service_suffix }}
+          ================================================
+      tags: [deploy, summary]

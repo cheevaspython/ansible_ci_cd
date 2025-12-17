@@ -1,0 +1,170 @@
+---
+# ============================================================================
+# DATABASE MIGRATION PLAYBOOK
+# ============================================================================
+
+- name: Run database migrations
+  hosts: swarm_managers[0]
+  gather_facts: yes
+
+  vars:
+    migration_timeout: 180 # 3 minutes
+    migration_check_interval: 2 # seconds
+
+  pre_tasks:
+    - name: Display migration information
+      debug:
+        msg: |
+          ================================================
+          DATABASE MIGRATION
+          ================================================
+          Stack: {{ stack_name }}
+          Service: migration{{ service_suffix }}
+          Environment: {{ environment_name }}
+          Timeout: {{ migration_timeout }}s
+          ================================================
+
+  tasks:
+    # ========================================================================
+    # PRE-MIGRATION CHECKS
+    # ========================================================================
+
+    - name: Check if PostgreSQL service is healthy
+      shell: |
+        docker service ps {{ stack_name }}_db_postgres{{ service_suffix }} \
+          --filter desired-state=running \
+          --format '{{.CurrentState}}'
+      register: postgres_status
+      changed_when: false
+      failed_when: postgres_status.stdout == ""
+      tags: [migrate, check]
+
+    - name: Display PostgreSQL status
+      debug:
+        msg: "PostgreSQL: {{ postgres_status.stdout_lines[0] }}"
+      tags: [migrate, check]
+
+    # ========================================================================
+    # SCALE MIGRATION SERVICE
+    # ========================================================================
+
+    - name: Scale migration service to 1 replica
+      shell: |
+        docker service scale --detach=true {{ stack_name }}_migration{{ service_suffix }}=1
+      register: scale_result
+      changed_when: "'scaled' in scale_result.stdout"
+      tags: [migrate, scale]
+
+    - name: Wait for migration task to start
+      shell: |
+        docker service ps {{ stack_name }}_migration{{ service_suffix }} \
+          --filter desired-state=shutdown \
+          --filter desired-state=running \
+          --format '{{.CurrentState}}' \
+          --no-trunc | head -n1
+      register: task_state
+      until: task_state.stdout != ""
+      retries: 30
+      delay: 2
+      changed_when: false
+      tags: [migrate, wait]
+
+    # ========================================================================
+    # MONITOR MIGRATION EXECUTION
+    # ========================================================================
+
+    - name: Monitor migration task completion
+      shell: |
+        docker service ps {{ stack_name }}_migration{{ service_suffix }} \
+          --filter desired-state=shutdown \
+          --format '{{.CurrentState}}' \
+          --no-trunc | head -n1
+      register: migration_state
+      until: >
+        'Complete' in migration_state.stdout or
+        'Failed' in migration_state.stdout or
+        'Rejected' in migration_state.stdout
+      retries: "{{ (migration_timeout / migration_check_interval) | int }}"
+      delay: "{{ migration_check_interval }}"
+      changed_when: false
+      failed_when: >
+        'Failed' in migration_state.stdout or
+        'Rejected' in migration_state.stdout
+      tags: [migrate, monitor]
+
+    - name: Display migration result
+      debug:
+        msg: "Migration status: {{ migration_state.stdout }}"
+      tags: [migrate, monitor]
+
+    # ========================================================================
+    # GET MIGRATION LOGS
+    # ========================================================================
+
+    - name: Retrieve migration logs
+      shell: |
+        docker service logs --tail 50 {{ stack_name }}_migration{{ service_suffix }} 2>/dev/null || echo "Logs not available"
+      register: migration_logs
+      changed_when: false
+      failed_when: false
+      tags: [migrate, logs]
+
+    - name: Display migration logs
+      debug:
+        msg: "{{ migration_logs.stdout_lines }}"
+      when: migration_logs.stdout != "Logs not available"
+      tags: [migrate, logs]
+
+    # ========================================================================
+    # CLEANUP
+    # ========================================================================
+
+    - name: Scale migration service back to 0
+      shell: |
+        docker service scale --detach=true {{ stack_name }}_migration{{ service_suffix }}=0
+      register: scale_down
+      changed_when: "'scaled' in scale_down.stdout"
+      tags: [migrate, cleanup]
+
+  post_tasks:
+    - name: Migration summary
+      debug:
+        msg: |
+          ================================================
+          MIGRATION COMPLETED SUCCESSFULLY
+          ================================================
+          Stack: {{ stack_name }}
+          Service: migration{{ service_suffix }}
+          Final State: {{ migration_state.stdout }}
+          ================================================
+      tags: [migrate, summary]
+
+  rescue:
+    - name: Migration failed - retrieving detailed logs
+      shell: |
+        echo "=== Task Details ===" &&
+        docker service ps {{ stack_name }}_migration{{ service_suffix }} --no-trunc &&
+        echo "" &&
+        echo "=== Task Logs ===" &&
+        docker service logs --tail 100 {{ stack_name }}_migration{{ service_suffix }} 2>/dev/null || echo "Logs not available"
+      register: failure_details
+      changed_when: false
+
+    - name: Display failure details
+      debug:
+        msg: "{{ failure_details.stdout_lines }}"
+
+    - name: Scale migration service back to 0
+      shell: |
+        docker service scale --detach=true {{ stack_name }}_migration{{ service_suffix }}=0
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with error message
+      fail:
+        msg: |
+          ================================================
+          MIGRATION FAILED
+          ================================================
+          Check the logs above for error details.
+          ================================================
