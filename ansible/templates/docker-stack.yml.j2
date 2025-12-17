@@ -15,8 +15,8 @@ x-fastapi-common: &fastapi-common
     - {{ postgres_user_secret }}
     - {{ postgres_password_secret }}
     - {{ redis_password_secret }}
-    - s3_access_key
-    - s3_secret_key
+    - {{ s3_access_key_secret }}
+    - {{ s3_secret_key_secret }}
   networks:
     - {{ internal_network }}
     - {{ public_network }}
@@ -280,9 +280,9 @@ secrets:
     external: true
   {{ redis_password_secret }}:
     external: true
-  s3_access_key:
+  {{ s3_access_key_secret }}:
     external: true
-  s3_secret_key:
+  {{ s3_secret_key_secret }}:
     external: true
 
 # ============================================================================

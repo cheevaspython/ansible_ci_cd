@@ -22,10 +22,12 @@ CALORIES ANSIBLE DEPLOYMENT - ГОТОВО К ИСПОЛЬЗОВАНИЮ
 
 2. НАСТРОЙКА:
    vim inventories/test/hosts  # добавь IP сервера
-   ./scripts/setup_environment.sh test
+   cd ansible && ansible-galaxy collection install -r requirements.yml
 
-3. SECRETS (на Swarm manager):
-   ./scripts/create_secrets.sh
+3. SECRETS (ВРУЧНУЮ на Swarm manager):
+   echo -n "password" | docker secret create postgres_user -
+   echo -n "password" | docker secret create postgres_password_product -
+   # и т.д. (см. EXAMPLES.txt)
 
 4. ДЕПЛОЙ:
    ansible-playbook deploy.yml -i inventories/test
@@ -57,8 +59,7 @@ ansible/:
     └── docker-stack.yml.j2      - Шаблон stack файла
 
 scripts/:
-├── setup_environment.sh         - Проверка готовности
-└── create_secrets.sh            - Создание secrets
+└── setup_environment.sh         - Проверка готовности
 
 ================================================================================
 АДАПТАЦИЯ ДЛЯ ДРУГИХ СЕРВИСОВ
@@ -74,9 +75,9 @@ scripts/:
    SERVICE_NAME: "auth"
    SERVICE_SUFFIX: "_auth"
 
-3. Docker secrets:
-   docker secret create postgres_password_auth -
-   docker secret create redis_auth_password -
+3. Docker secrets (ВРУЧНУЮ):
+   echo -n "password" | docker secret create postgres_password_auth -
+   echo -n "password" | docker secret create redis_auth_password -
 
 4. Deploy:
    ansible-playbook deploy.yml -i inventories/test

@@ -97,6 +97,7 @@
         password: "{{ registry_password_input.user_input | default(lookup('env', 'REGISTRY_PASSWORD'), true) }}"
         reauthorize: yes
       no_log: true
+      when: registry_password_required | bool
       tags: [rollback, login]
 
     # ========================================================================

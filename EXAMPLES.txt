@@ -20,9 +20,8 @@ cd scripts
 chmod +x setup_environment.sh
 ./setup_environment.sh test
 
-# DOCKER SECRETS (на Swarm manager)
-chmod +x create_secrets.sh
-./create_secrets.sh
+# DOCKER SECRETS (создаются ВРУЧНУЮ на Swarm manager один раз)
+# См. раздел "СОЗДАНИЕ DOCKER SECRETS" ниже
 
 # DOCKER NETWORKS (на Swarm manager)
 docker network create --driver overlay internal_network
@@ -70,6 +69,26 @@ docker stack services main
 
 # Get deployed image
 docker service inspect main_backend_product --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}'
+
+# ============================================================================
+# СОЗДАНИЕ DOCKER SECRETS (ВРУЧНУЮ, ОДИН РАЗ)
+# ============================================================================
+
+# ВАЖНО: Secrets создаются ВРУЧНУЮ на Swarm manager!
+# НЕ храните пароли в скриптах или в Git!
+
+# Создание secrets интерактивно (безопасно)
+echo -n "your_postgres_user" | docker secret create postgres_user -
+echo -n "your_secure_password" | docker secret create postgres_password_product -
+echo -n "your_redis_password" | docker secret create redis_product_password -
+echo -n "your_s3_access_key" | docker secret create s3_access_key -
+echo -n "your_s3_secret_key" | docker secret create s3_secret_key -
+
+# Проверка созданных secrets
+docker secret ls
+
+# ВАЖНО: После создания secrets НЕ МОГУТ быть прочитаны!
+# Убедитесь что вы сохранили пароли в безопасном месте (KeePass, 1Password, etc.)
 
 # ============================================================================
 # ADAPTING FOR OTHER MICROSERVICES

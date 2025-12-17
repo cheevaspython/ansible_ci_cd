@@ -41,6 +41,14 @@ fi
 
 log_info "Setting up environment: $ENVIRONMENT"
 
+# Determine project root (assuming script is in scripts/ subdirectory)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ANSIBLE_DIR="$PROJECT_ROOT/ansible"
+
+log_info "Project root: $PROJECT_ROOT"
+log_info "Ansible directory: $ANSIBLE_DIR"
+
 # Check Ansible
 if ! command -v ansible &>/dev/null; then
   log_error "Ansible is not installed"
@@ -49,13 +57,24 @@ if ! command -v ansible &>/dev/null; then
 fi
 log_success "Ansible is installed: $(ansible --version | head -n1)"
 
+# Check if ansible directory exists
+if [ ! -d "$ANSIBLE_DIR" ]; then
+  log_error "Ansible directory not found: $ANSIBLE_DIR"
+  exit 1
+fi
+
 # Install collections
 log_info "Installing Ansible collections..."
-ansible-galaxy collection install -r requirements.yml --force
-log_success "Ansible collections installed"
+if [ -f "$ANSIBLE_DIR/requirements.yml" ]; then
+  ansible-galaxy collection install -r "$ANSIBLE_DIR/requirements.yml" --force
+  log_success "Ansible collections installed"
+else
+  log_error "Requirements file not found: $ANSIBLE_DIR/requirements.yml"
+  exit 1
+fi
 
 # Check inventory
-INVENTORY_FILE="inventories/$ENVIRONMENT/hosts"
+INVENTORY_FILE="$ANSIBLE_DIR/inventories/$ENVIRONMENT/hosts"
 if [ ! -f "$INVENTORY_FILE" ]; then
   log_error "Inventory file not found: $INVENTORY_FILE"
   exit 1
@@ -74,6 +93,7 @@ else
     log_success "SSH connectivity OK"
   else
     log_warning "SSH connectivity test failed"
+    log_info "Tip: Check SSH keys and ansible_host in inventory"
   fi
 fi
 
@@ -125,6 +145,8 @@ log_info "================================================"
 log_info "Environment: $ENVIRONMENT"
 log_info ""
 log_info "Next steps:"
-log_info "  1. Test deployment: ansible-playbook deploy.yml -i inventories/$ENVIRONMENT --check"
-log_info "  2. Deploy: ansible-playbook deploy.yml -i inventories/$ENVIRONMENT"
+log_info "  1. Create Docker secrets on Swarm manager (see EXAMPLES.txt)"
+log_info "  2. cd $ANSIBLE_DIR"
+log_info "  3. Test deployment: ansible-playbook deploy.yml -i inventories/$ENVIRONMENT --check"
+log_info "  4. Deploy: ansible-playbook deploy.yml -i inventories/$ENVIRONMENT"
 log_info "================================================"

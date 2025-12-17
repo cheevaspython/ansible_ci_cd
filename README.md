@@ -40,12 +40,24 @@ chmod +x setup_environment.sh
 
 ### 4. Создание Docker secrets
 
-На Swarm manager ноде:
+**ВАЖНО:** Secrets создаются **ВРУЧНУЮ** на Swarm manager ноде один раз!
 
 ```bash
-chmod +x create_secrets.sh
-./create_secrets.sh
+# На Swarm manager ноде выполните:
+echo -n "your_postgres_user" | docker secret create postgres_user -
+echo -n "your_secure_password" | docker secret create postgres_password_product -
+echo -n "your_redis_password" | docker secret create redis_product_password -
+echo -n "your_s3_access_key" | docker secret create s3_access_key -
+echo -n "your_s3_secret_key" | docker secret create s3_secret_key -
+
+# Проверьте созданные secrets:
+docker secret ls
 ```
+
+**⚠️ БЕЗОПАСНОСТЬ:**
+- НЕ храните пароли в скриптах или Git
+- Сохраните пароли в безопасном месте (KeePass, 1Password)
+- После создания secrets НЕ МОГУТ быть прочитаны из Docker
 
 ### 5. Деплой
 
@@ -78,8 +90,7 @@ ansible-playbook migrate.yml -i inventories/test
 │   └── templates/
 │       └── docker-stack.yml.j2 # Шаблон stack файла
 ├── scripts/
-│   ├── setup_environment.sh    # Проверка окружения
-│   └── create_secrets.sh       # Создание secrets
+│   └── setup_environment.sh    # Проверка окружения
 ├── .gitlab-ci.yml              # CI/CD pipeline
 └── MANUAL.txt                  # Подробная документация
 ```
@@ -157,8 +168,8 @@ CI_REGISTRY_IMAGE: "registry.gitlab.com/cheepython/calorie_auth"
 3. Создайте соответствующие Docker secrets:
 
 ```bash
-docker secret create postgres_password_auth -
-docker secret create redis_auth_password -
+echo -n "password" | docker secret create postgres_password_auth -
+echo -n "password" | docker secret create redis_auth_password -
 ```
 
 4. Задеплойте:
